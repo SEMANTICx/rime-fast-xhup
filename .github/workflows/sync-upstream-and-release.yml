@@ -122,7 +122,7 @@ jobs:
           git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Build release zip
+            - name: Build release zip
         id: package
         if: steps.check.outputs.should_release == 'true'
         shell: bash
@@ -135,16 +135,23 @@ jobs:
           rm -f "${ZIP}"
 
           if [[ "${INCLUDE_SUBMODULES}" == "true" ]]; then
-            # 上游子模块如果使用 git@github.com:... 形式，这里自动改写成 HTTPS。
-            git config --global url."https://github.com/".insteadOf "git@github.com:"
-            git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-
             PKG_DIR="${RUNNER_TEMP}/rime-fast-xhup-package"
             rm -rf "${PKG_DIR}"
 
             git worktree add --detach "${PKG_DIR}" "${UPSTREAM_SHA}"
 
             cd "${PKG_DIR}"
+
+            # 上游 .gitmodules 里 cn_dicts/ext 使用 SSH 地址：
+            # git@github.com:boomker/Rime-flyhe-dict.git
+            # GitHub Actions 默认没有 SSH key，所以这里强制改成 HTTPS。
+            if [[ -f ".gitmodules" ]]; then
+              sed -i 's#git@github.com:#https://github.com/#g' .gitmodules
+              sed -i 's#ssh://git@github.com/#https://github.com/#g' .gitmodules
+
+              git submodule sync --recursive
+            fi
+
             git submodule update --init --recursive
 
             zip -r "${ZIP}" . \
