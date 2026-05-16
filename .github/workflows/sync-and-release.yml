@@ -97,6 +97,7 @@ jobs:
           BODY="## 与上个版本的变更\n\n${{ steps.check.outputs.CHANGELOG }}\n\n---\n_由 GitHub Actions 自动同步自 [boomker/rime-fast-xhup](https://github.com/boomker/rime-fast-xhup)_"
 
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --notes "$(printf "$BODY")" \
             --latest
