@@ -29,11 +29,11 @@ env:
   # Release tag 格式：sync-20260516-a1b2c3d
   RELEASE_PREFIX: sync
 
-  # 你希望 Release 里上传的固定文件名
+  # Release Assets 里你上传的固定文件名
   ASSET_NAME: rime-fast-xhup.zip
 
-  # true：打包时包含子模块内容，推荐。
-  # false：只打包主仓库内容，不包含子模块。
+  # true：打包时包含子模块内容
+  # false：只打包主仓库内容，不包含子模块
   INCLUDE_SUBMODULES: "true"
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -122,7 +122,7 @@ jobs:
           git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
-            - name: Build release zip
+      - name: Build release zip
         id: package
         if: steps.check.outputs.should_release == 'true'
         shell: bash
@@ -142,7 +142,7 @@ jobs:
 
             cd "${PKG_DIR}"
 
-            # 上游 .gitmodules 里 cn_dicts/ext 使用 SSH 地址：
+            # 上游 .gitmodules 里的子模块地址可能是：
             # git@github.com:boomker/Rime-flyhe-dict.git
             # GitHub Actions 默认没有 SSH key，所以这里强制改成 HTTPS。
             if [[ -f ".gitmodules" ]]; then
