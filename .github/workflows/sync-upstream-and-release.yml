@@ -1,0 +1,252 @@
+name: Sync upstream and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "没有上游新提交时，也强制为当前上游 HEAD 创建 Release"
+        required: false
+        type: boolean
+        default: false
+
+  schedule:
+    # UTC 时间。这里是每天 19:23 UTC，即北京时间次日 03:23。
+    # GitHub Actions 的 cron 使用 UTC；不要写整点，降低延迟概率。
+    - cron: "23 19 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
+env:
+  # 上游仓库
+  UPSTREAM_REPO: boomker/rime-fast-xhup
+  UPSTREAM_BRANCH: main
+
+  # Release tag 格式：sync-20260516-a1b2c3d
+  RELEASE_PREFIX: sync
+
+  # 你希望 Release 里上传的固定文件名
+  ASSET_NAME: rime-fast-xhup.zip
+
+  # true：打包时包含子模块内容，推荐。
+  # false：只打包主仓库内容，不包含子模块。
+  INCLUDE_SUBMODULES: "true"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git and fetch upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags
+          git fetch origin "${GITHUB_REF_NAME}" --tags
+
+      - name: Check upstream changes
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_RELEASE: ${{ github.event.inputs.force_release || 'false' }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_REF="upstream/${UPSTREAM_BRANCH}"
+          UPSTREAM_SHA="$(git rev-parse "${UPSTREAM_REF}")"
+          OLD_BASE="$(git merge-base HEAD "${UPSTREAM_REF}")"
+
+          SHORT_SHA="${UPSTREAM_SHA:0:7}"
+          DATE="$(git show -s --format=%cd --date=format:%Y%m%d "${UPSTREAM_SHA}")"
+          TAG="${RELEASE_PREFIX}-${DATE}-${SHORT_SHA}"
+
+          if git merge-base --is-ancestor "${UPSTREAM_SHA}" HEAD; then
+            CHANGED="false"
+            echo "No new upstream commits."
+          else
+            CHANGED="true"
+            echo "New upstream commits detected."
+          fi
+
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            RELEASE_EXISTS="true"
+            echo "Release ${TAG} already exists."
+          else
+            RELEASE_EXISTS="false"
+            echo "Release ${TAG} does not exist."
+          fi
+
+          SHOULD_RELEASE="false"
+          if [[ "${RELEASE_EXISTS}" == "false" && ( "${CHANGED}" == "true" || "${FORCE_RELEASE}" == "true" ) ]]; then
+            SHOULD_RELEASE="true"
+          fi
+
+          {
+            echo "upstream_sha=${UPSTREAM_SHA}"
+            echo "old_base=${OLD_BASE}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "date=${DATE}"
+            echo "tag=${TAG}"
+            echo "changed=${CHANGED}"
+            echo "release_exists=${RELEASE_EXISTS}"
+            echo "should_release=${SHOULD_RELEASE}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "changed=${CHANGED}"
+          echo "release_exists=${RELEASE_EXISTS}"
+          echo "should_release=${SHOULD_RELEASE}"
+          echo "tag=${TAG}"
+
+      - name: Merge upstream into fork
+        if: steps.check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Build release zip
+        id: package
+        if: steps.check.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
+          ZIP="${RUNNER_TEMP}/${ASSET_NAME}"
+
+          rm -f "${ZIP}"
+
+          if [[ "${INCLUDE_SUBMODULES}" == "true" ]]; then
+            # 上游子模块如果使用 git@github.com:... 形式，这里自动改写成 HTTPS。
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+            PKG_DIR="${RUNNER_TEMP}/rime-fast-xhup-package"
+            rm -rf "${PKG_DIR}"
+
+            git worktree add --detach "${PKG_DIR}" "${UPSTREAM_SHA}"
+
+            cd "${PKG_DIR}"
+            git submodule update --init --recursive
+
+            zip -r "${ZIP}" . \
+              -x ".git" ".git/*" "*/.git" "*/.git/*"
+          else
+            git archive --format=zip --output="${ZIP}" "${UPSTREAM_SHA}"
+          fi
+
+          ls -lh "${ZIP}"
+          echo "zip=${ZIP}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate release notes
+        id: notes
+        if: steps.check.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOTES="${RUNNER_TEMP}/release-notes.md"
+
+          TAG="${{ steps.check.outputs.tag }}"
+          UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
+          OLD_BASE="${{ steps.check.outputs.old_base }}"
+
+          CURRENT_DOWNLOAD="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}"
+          LATEST_DOWNLOAD="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${ASSET_NAME}"
+
+          {
+            echo "## Changelog"
+            echo
+            echo "- 版本号：\`${TAG}\`"
+            echo "- 上游仓库：\`${UPSTREAM_REPO}\`"
+            echo "- 上游分支：\`${UPSTREAM_BRANCH}\`"
+            echo "- 上游提交：\`${UPSTREAM_SHA}\`"
+            echo "- 打包文件：\`${ASSET_NAME}\`"
+            echo
+            echo "## 下载"
+            echo
+            echo "请下载本 Release Assets 中的："
+            echo
+            echo "- \`${ASSET_NAME}\`"
+            echo
+            echo "当前版本下载："
+            echo
+            echo "\`${CURRENT_DOWNLOAD}\`"
+            echo
+            echo "最新版本固定下载："
+            echo
+            echo "\`${LATEST_DOWNLOAD}\`"
+            echo
+            echo "> 不建议下载 GitHub 自动生成的 \`Source code (zip)\` 或 \`Source code (tar.gz)\`。"
+            echo
+            echo "## 本次包含的上游提交"
+            echo
+
+            COMMITS="$(git log --oneline --no-merges "${OLD_BASE}..${UPSTREAM_SHA}" || true)"
+            if [[ -n "${COMMITS}" ]]; then
+              printf '%s\n' "${COMMITS}" | sed 's/^/- /'
+            else
+              echo "- 本次为手动补发 Release，未检测到新的上游提交。"
+            fi
+
+            echo
+            echo "## 文件变更概览"
+            echo
+
+            if git diff --quiet "${OLD_BASE}" "${UPSTREAM_SHA}"; then
+              echo "- 无文件变更。"
+            else
+              echo '```text'
+              git diff --stat "${OLD_BASE}" "${UPSTREAM_SHA}"
+              echo '```'
+            fi
+
+            echo
+            echo "## 变更文件列表"
+            echo
+
+            if git diff --quiet "${OLD_BASE}" "${UPSTREAM_SHA}"; then
+              echo "- 无文件变更。"
+            else
+              echo '```text'
+              git diff --name-status "${OLD_BASE}" "${UPSTREAM_SHA}"
+              echo '```'
+            fi
+          } > "${NOTES}"
+
+          cat "${NOTES}"
+          echo "path=${NOTES}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh release create "${{ steps.check.outputs.tag }}" \
+            "${{ steps.package.outputs.zip }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${{ steps.check.outputs.upstream_sha }}" \
+            --title "rime-fast-xhup ${{ steps.check.outputs.tag }}" \
+            --notes-file "${{ steps.notes.outputs.path }}" \
+            --latest
